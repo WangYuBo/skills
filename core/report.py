@@ -12,7 +12,7 @@ from collections import Counter
 from dataclasses import asdict, is_dataclass
 from typing import Iterable
 
-from core.match import Verdict
+from core.types import Verdict
 
 
 GRADE_LABEL = {
@@ -86,7 +86,7 @@ def _render_md(verdicts: list[Verdict], warnings: list[str]) -> bytes:
             lines.append(f"- {w}")
     # 按 grade 优先排序：D > C > B > A，让需要关注的在前面
     order = {"D": 0, "C": 1, "B": 2, "A": 3}
-    sorted_v = sorted(verdicts, key=lambda v: (order[v.grade], v.citation.raw_para_idx))
+    sorted_v = sorted(verdicts, key=lambda v: (order[v.grade], v.citation.seq))
     for grade in ("D", "C", "B", "A"):
         items = [v for v in sorted_v if v.grade == grade]
         if not items:
@@ -127,7 +127,7 @@ def _render_html(verdicts: list[Verdict], warnings: list[str]) -> bytes:
     s = _summary(verdicts)
     rows: list[str] = []
     order = {"D": 0, "C": 1, "B": 2, "A": 3}
-    sorted_v = sorted(verdicts, key=lambda v: (order[v.grade], v.citation.raw_para_idx))
+    sorted_v = sorted(verdicts, key=lambda v: (order[v.grade], v.citation.seq))
     for v in sorted_v:
         c = v.citation
         ev = v.evidence

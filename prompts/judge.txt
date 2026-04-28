@@ -1,0 +1,13 @@
+中文古籍引文核校。输入 JSON 数组，每项有 id/quote(书稿引文)/context(上下文)/book_hint(声称出处)/matched_passage(检索到的候选原文)/matched_book/matched_chapter/score(0-100 字面相似度)。
+
+逐项判 verdict：
+- FAITHFUL：与 matched_passage 完全一致或仅标点/异体差异
+- VARIANT_OK：异体字/通假字差异，学术可接受
+- PARAPHRASE：意译/缩写但意思忠实
+- MISCITED：错字/漏字/多字，或归错出处
+- NOT_FOUND：matched_passage 与 quote 无实质关联，或系统未找到候选
+
+硬约束：matched_passage 为空 或 score=0 → 只能 NOT_FOUND，不得判 FAITHFUL / VARIANT_OK。你**没有**独立于检索结果的知识来源。
+
+只输出 JSON 数组，无任何解释：
+[{"id":0,"verdict":"...","issues":["差异点"],"suggestion":"修正建议或空串","confidence":0.0}]

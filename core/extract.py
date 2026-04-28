@@ -10,10 +10,9 @@ extract(doc) -> list[Citation]。识别书稿中的引文及其上下文：
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
-from typing import Iterable
 
 from core.normalize import normalize
+from core.types import Citation, Document
 
 
 # Chinese double quotes only (U+201C/U+201D). Min 2 chars, max 200 to avoid runaway matches.
@@ -28,20 +27,7 @@ _NOTE_HEADER_RE = re.compile(r"^\s*(注释|注)\s*[:：]?\s*$")
 _NOTE_ITEM_RE = re.compile(r"^\s*(?:[(（]?\d+[)）.、]|[①②③④⑤⑥⑦⑧⑨⑩])\s*")
 
 
-@dataclass
-class Citation:
-    quote: str                # 原始引文（已去引号字符）
-    quote_norm: str           # 归一化后用于匹配
-    context: str              # 上下文片段（前后各 100 字内）
-    location: str             # "para[5]" / "note[9]"
-    source: str               # 'body' | 'note'
-    book_hint: str | None = None
-    chapter_hint: str | None = None
-    raw_para_idx: int = -1    # 引用段在文档中的段落索引
-    is_concept: bool = False  # True 表示概念词/强调引号，不需要核校
-
-
-def extract(doc) -> list[Citation]:
+def extract(doc: Document) -> list[Citation]:
     """从 Document 抽取所有引文。"""
     citations: list[Citation] = []
     paragraphs = doc.paragraphs
@@ -83,7 +69,7 @@ def extract(doc) -> list[Citation]:
                     source=kind,
                     book_hint=book,
                     chapter_hint=chapter,
-                    raw_para_idx=i,
+                    seq=i,
                     is_concept=is_concept,
                 )
             )
@@ -119,7 +105,7 @@ def _dedup(citations: list[Citation]) -> list[Citation]:
     seen: set[tuple[int, str]] = set()
     out: list[Citation] = []
     for c in citations:
-        key = (c.raw_para_idx, c.quote_norm)
+        key = (c.seq, c.quote_norm)
         if key in seen:
             continue
         seen.add(key)

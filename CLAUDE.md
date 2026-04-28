@@ -24,3 +24,4 @@ Chinese classical citations have unique verification challenges beyond simple st
 
 ## Design Principles
 - 降低复杂度:通过深模块 + 信息隐藏 + 抽象分层 + 把复杂度向下压
+- 书稿中的引文解析，宁多勿缺；

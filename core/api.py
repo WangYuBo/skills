@@ -14,10 +14,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from core.extract import Citation, extract
-from core.index import Corpus, build_corpus
-from core.match import Verdict, match
+from core.extract import extract
+from core.index import build_corpus
+from core.match import match
 from core.parse import parse
+from core.types import Citation, Verdict
 
 
 ProgressFn = Callable[[dict], None]
@@ -40,20 +41,26 @@ def check(
     bibs: list[str | Path],
     *,
     llm_key: str | None = None,
-    llm_model: str = "deepseek-ai/DeepSeek-V4-Flash",
-    llm_base_url: str = "https://api.siliconflow.cn/v1",
+    llm_model: str = "deepseek-chat",
+    llm_base_url: str = "https://api.deepseek.com/v1",
+    extract_mode: str = "llm",
+    concurrency: int = 16,
+    chunk_chars: int = 1800,
     on_progress: ProgressFn | None = None,
 ) -> Report:
     """核校书稿引文，永不抛异常。
 
     Parameters
     ----------
-    manuscript : 书稿路径（docx/txt/pdf）
-    bibs       : 参考文献路径列表（txt/docx/pdf）
-    llm_key    : SiliconFlow API key；不传则从 SILICONFLOW_API_KEY 环境变量读取；
-                 仍无则跳过 LLM 阶段，只输出字面层判定（C/D 不会有 LLM 修正）
-    llm_model  : 默认 deepseek-ai/DeepSeek-V4-Flash
-    on_progress: 回调，参数为 {"stage": str, ...}
+    manuscript  : 书稿路径（docx/txt/pdf）
+    bibs        : 参考文献路径列表（txt/docx/pdf）
+    llm_key     : LLM API key；不传则按 DEEPSEEK_API_KEY → SILICONFLOW_API_KEY 顺序读环境变量
+    llm_model   : 默认 deepseek-chat（DeepSeek 官方）
+    llm_base_url: 默认 DeepSeek 官方端点；切到 SiliconFlow 需同时改 model
+    extract_mode: "llm"（默认，纯 LLM 异步并发）| "regex"（fallback，仅识别显式引号引文）
+    concurrency : LLM 提取阶段并发上限（默认 16）
+    chunk_chars : 每个提取 chunk 的字符预算（默认 1800）
+    on_progress : 回调，参数为 {"stage": str, ...}
     """
     report = Report()
     progress = on_progress or _noop
@@ -70,9 +77,27 @@ def check(
     progress({"stage": "parse_done", "chars": doc.length})
 
     # Stage 2: 引文抽取
+    # extract_mode="llm" 走纯 LLM 异步并发流水线；"regex" 仅跑正则层（fallback）。
     t0 = time.time()
     try:
-        citations = extract(doc)
+        progress({"stage": "extract_start", "mode": extract_mode})
+        if extract_mode == "llm":
+            from core.extract_llm import extract_sync as _extract_sync
+            extract_llm_client = _make_llm(llm_key, llm_model, llm_base_url, report.warnings)
+            if extract_llm_client is None:
+                report.warnings.append("LLM 提取模式需要 API key，已退化为纯正则模式")
+                citations = extract(doc)
+            else:
+                citations = _extract_sync(
+                    doc,
+                    llm=extract_llm_client,
+                    concurrency=concurrency,
+                    chunk_chars=chunk_chars,
+                    on_progress=progress,
+                    warnings=report.warnings,
+                )
+        else:
+            citations = extract(doc)
     except Exception as e:
         report.warnings.append(f"引文抽取失败：{e}")
         return report
@@ -116,7 +141,7 @@ def _make_llm(key: str | None, model: str, base_url: str, warnings: list[str]):
     """创建 LLM 客户端；环境变量未设置或 SDK 未安装时返回 None（跳过 LLM 阶段）。"""
     if key == "":  # 显式跳过（--no-llm）
         return None
-    key = key or os.environ.get("SILICONFLOW_API_KEY")
+    key = key or os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("SILICONFLOW_API_KEY")
     if not key:
         return None
     try:

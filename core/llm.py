@@ -1,9 +1,11 @@
 """LLM 客户端 + 语义判定阶段。
 
-使用 SiliconFlow 平台（OpenAI 兼容协议）调用 deepseek-ai/DeepSeek-V4-Flash。
-封装在本模块后，未来切换 provider（Claude / OpenAI / 自部署）只需改这一处。
+默认走 DeepSeek 官方 API（OpenAI 兼容协议）。封装在本模块后，未来切换 provider 只需
+改本模块。
 
-只对 needs_llm=True 的 Verdict 调用。批量并发，单次 batch 处理 8-12 条。
+提供两套调用接口：
+  - chat_json(system, user) — 同步，judge 阶段用
+  - async_chat_json(system, user) — 异步，extract 阶段并发用
 """
 from __future__ import annotations
 
@@ -11,29 +13,45 @@ import concurrent.futures as _cf
 import json
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
-from core.match import Verdict
+from core.types import Verdict
 
 
 @dataclass
 class LLMClient:
     api_key: str
-    model: str = "deepseek-ai/DeepSeek-V4-Flash"
-    base_url: str = "https://api.siliconflow.cn/v1"
-    timeout: float = 60.0
-    max_retries: int = 2
+    model: str = "deepseek-chat"
+    base_url: str = "https://api.deepseek.com/v1"
+    timeout: float = 45.0
+    max_retries: int = 1
 
     _client: Any = None
+    _async_client: Any = None
 
     def __post_init__(self) -> None:
-        from openai import OpenAI
-        self._client = OpenAI(api_key=self.api_key, base_url=self.base_url, timeout=self.timeout)
+        from openai import OpenAI, AsyncOpenAI
+        # max_retries=0 关掉 SDK 内置重试，避免一次调用叠加多层指数退避（实测上游 500
+        # 时单批可被拖到 480s）。控制权交给本类的外层 max_retries。
+        self._client = OpenAI(
+            api_key=self.api_key,
+            base_url=self.base_url,
+            timeout=self.timeout,
+            max_retries=0,
+        )
+        self._async_client = AsyncOpenAI(
+            api_key=self.api_key,
+            base_url=self.base_url,
+            timeout=self.timeout,
+            max_retries=0,
+        )
 
     def chat_json(self, system: str, user: str) -> dict | list:
-        """调一次 chat completion，要求 JSON 输出。失败抛异常。"""
+        """同步：调一次 chat completion，要求 JSON 输出。失败抛异常。"""
+        import time as _t
         last_err: Exception | None = None
-        for _ in range(self.max_retries + 1):
+        for attempt in range(self.max_retries + 1):
             try:
                 resp = self._client.chat.completions.create(
                     model=self.model,
@@ -47,7 +65,27 @@ class LLMClient:
                 return _extract_json(content)
             except Exception as e:
                 last_err = e
+                if attempt < self.max_retries:
+                    _t.sleep(1.0)
         raise RuntimeError(f"LLM 调用失败：{last_err}")
+
+    async def async_chat_json(self, system: str, user: str) -> dict | list:
+        """异步：调一次 chat completion。失败抛异常，由调用方决定重试策略。"""
+        resp = await self._async_client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            temperature=0.1,
+        )
+        content = resp.choices[0].message.content or "{}"
+        return _extract_json(content)
+
+    async def aclose(self) -> None:
+        """关闭异步客户端的连接池。"""
+        if self._async_client is not None:
+            await self._async_client.close()
 
 
 def _extract_json(content: str) -> dict | list:
@@ -66,32 +104,10 @@ def _extract_json(content: str) -> dict | list:
 
 # ---------- 批量判定 ----------
 
-_SYSTEM_PROMPT = """你是中文古籍引文核校专家。给定书稿引文与候选原文，判断引文使用是否准确。
+def _load_judge_prompt() -> str:
+    return (Path(__file__).parent.parent / "prompts" / "judge.txt").read_text(encoding="utf-8")
 
-输入：JSON 数组，每项包含
-  id, quote(书稿引文), context(书稿上下文), book_hint(作者声称的出处),
-  matched_passage(系统检索到的候选原文，可能为空),
-  matched_book(候选原文所在文献), matched_chapter(候选原文章节), score(字面相似度 0-100).
-
-请逐项判定并输出 JSON 数组：
-[
-  {
-    "id": 0,
-    "verdict": "FAITHFUL" | "PARAPHRASE" | "MISCITED" | "NOT_FOUND" | "VARIANT_OK",
-    "issues": ["简短描述差异点"],
-    "suggestion": "如何修正引文（若需要），否则空字符串",
-    "confidence": 0.0-1.0
-  }
-]
-
-verdict 含义：
-- FAITHFUL    引文与原文完全一致或仅标点/异体字差异，意思无变化
-- VARIANT_OK  存在异体字/通假字差异但学术上可接受
-- PARAPHRASE  作者意译/缩写但意思忠实
-- MISCITED    引文有错字/漏字/多字，或归错出处
-- NOT_FOUND   候选原文与书稿引文无实质关联（系统找错了），或系统未找到任何候选
-
-只输出 JSON 数组，不要任何额外说明。"""
+_SYSTEM_PROMPT = _load_judge_prompt()
 
 
 def judge_batch(
